@@ -63,7 +63,8 @@ class LRCer:
                  asr_options: Optional[dict] = None, vad_options: Optional[dict] = None,
                  preprocess_options: Optional[dict] = None, proxy: Optional[str] = None,
                  base_url_config: Optional[dict] = None, glossary: Optional[Union[dict, str, Path]] = None,
-                 retry_model: Optional[Union[str, ModelConfig]] = None, is_force_glossary_used: bool = False):
+                 retry_model: Optional[Union[str, ModelConfig]] = None, is_force_glossary_used: bool = False,
+                 gemini_balance_api_key: Optional[str] = None, gemini_balance_api_url: Optional[str] = None):
         self.chatbot_model = chatbot_model
         self.fee_limit = fee_limit
         self.api_fee = 0  # Can be updated in different thread, operation should be thread-safe
@@ -73,6 +74,8 @@ class LRCer:
         self.glossary = self.parse_glossary(glossary)
         self.retry_model = retry_model
         self.is_force_glossary_used = is_force_glossary_used
+        self.gemini_balance_api_key = gemini_balance_api_key
+        self.gemini_balance_api_url = gemini_balance_api_url
 
         self._lock = Lock()
         self.exception = None
@@ -270,7 +273,9 @@ class LRCer:
             # Translate the transcribed json
             translator = LLMTranslator(chatbot_model=self.chatbot_model, fee_limit=self.fee_limit,
                                        proxy=self.proxy, base_url_config=self.base_url_config,
-                                       retry_model=self.retry_model)
+                                       retry_model=self.retry_model,
+                                       gemini_balance_api_key=self.gemini_balance_api_key,
+                                       gemini_balance_api_url=self.gemini_balance_api_url)
 
             target_texts = translator.translate(
                 transcribed_opt_sub.texts,
@@ -420,8 +425,6 @@ class LRCer:
 
         Returns:
             dict: The JSON representation of the transcription.
-
-        This method creates a JSON structure from the transcription segments and saves it to a file.
         """
         result = {
             'language': lang,

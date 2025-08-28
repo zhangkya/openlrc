@@ -7,7 +7,9 @@ import os
 import random
 import re
 import time
+from collections import deque
 from copy import deepcopy
+from datetime import datetime, date
 from typing import List, Union, Dict, Callable, Optional
 
 import anthropic
@@ -46,6 +48,10 @@ def _register_chatbot(cls):
             if model.latest_alias:
                 model2chatbot[model.latest_alias] = cls
         elif model.provider == ModelProvider.GOOGLE and cls.__name__ == 'GeminiBot':
+            model2chatbot[model.name] = cls
+            if model.latest_alias:
+                model2chatbot[model.latest_alias] = cls
+        elif model.provider == ModelProvider.GEMINI_BALANCE and cls.__name__ == 'GeminiBalanceBot':
             model2chatbot[model.name] = cls
             if model.latest_alias:
                 model2chatbot[model.latest_alias] = cls
@@ -345,6 +351,144 @@ class ClaudeBot(ChatBot):
             return 15
 
 
+# Rate limiting for GeminiBalanceBot
+RPM_LIMIT = 10
+RPD_LIMIT = 250
+TPM_LIMIT = 250000
+
+request_timestamps = deque()
+token_timestamps = deque()
+daily_request_count = 0
+last_request_day = None
+rate_limit_lock = asyncio.Lock()
+
+
+@_register_chatbot
+class GeminiBalanceBot(ChatBot):
+    def __init__(self, model_name='gemini-2.5-flash', temperature=1, top_p=1, retry=8, max_async=16, fee_limit=0.8,
+                 proxy=None, api_key=None, base_url=None):
+        super().__init__(model_name, temperature, top_p, retry, max_async, fee_limit)
+
+        self.api_key = api_key or os.environ.get('GEMINI_BALANCE_API_KEY')
+        self.base_url = base_url or os.environ.get('GEMINI_BALANCE_API_URL')
+
+        if not self.api_key or not self.base_url:
+            raise ValueError("GEMINI_BALANCE_API_KEY and GEMINI_BALANCE_API_URL must be set in environment variables.")
+
+        self.async_client = httpx.AsyncClient(
+            proxy=proxy,
+            base_url=self.base_url,
+            headers={"Authorization": f"Bearer {self.api_key}"}
+        )
+
+    def update_fee(self, response):
+        try:
+            usage = response.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+
+            self.api_fees[-1] += (prompt_tokens * self.model_info.input_price +
+                                  completion_tokens * self.model_info.output_price) / 1000000
+        except Exception as e:
+            logger.warning(f"Could not update fee for GeminiBalance: {e}")
+
+    def get_content(self, response):
+        return response['choices'][0]['message']['content']
+
+    async def _create_achat(self, messages: List[Dict], stop_sequences: Optional[List[str]] = None,
+                            output_checker: Callable = lambda user_input, generated_content: True):
+        await self.wait_for_rate_limit(messages)
+
+        response = None
+        for i in range(self.retry):
+            try:
+                payload = {
+                    "model": self.model_name,
+                    "messages": messages,
+                    "temperature": self.temperature,
+                    "top_p": self.top_p,
+                    "stop": stop_sequences,
+                }
+
+                api_response = await self.async_client.post("/chat/completions", json=payload, timeout=60)
+                api_response.raise_for_status()
+                response = api_response.json()
+
+                self.update_fee(response)
+                if response.get('choices', [{}])[0].get('finish_reason') == 'length':
+                    raise LengthExceedException(response)
+
+                response_text = remove_stop(self.get_content(response), stop_sequences)
+
+                if not output_checker(messages[-1]['content'], response_text):
+                    logger.warning(f'Invalid response format. Retry num: {i + 1}.')
+                    continue
+
+                async with rate_limit_lock:
+                    now = time.time()
+                    request_timestamps.append(now)
+
+                    usage = response.get("usage", {})
+                    total_tokens = usage.get("total_tokens", 0)
+                    token_timestamps.append((now, total_tokens))
+
+                    global daily_request_count
+                    daily_request_count += 1
+
+                break
+            except httpx.HTTPStatusError as e:
+                sleep_time = self._get_sleep_time(e)
+                logger.warning(f'{type(e).__name__}: {e}. Wait {sleep_time}s before retry. Retry num: {i + 1}.')
+                await asyncio.sleep(sleep_time)
+            except Exception as e:
+                sleep_time = 15
+                logger.warning(f'An unexpected error occurred: {type(e).__name__}: {e}. Wait {sleep_time}s. Retry num: {i + 1}')
+                await asyncio.sleep(sleep_time)
+
+        if not response:
+            raise ChatBotException('Failed to create a chat with GeminiBalance.')
+
+        return response
+
+    async def wait_for_rate_limit(self, messages):
+        global daily_request_count, last_request_day
+
+        async with rate_limit_lock:
+            now = time.time()
+            today = date.today()
+
+            if last_request_day != today:
+                last_request_day = today
+                daily_request_count = 0
+
+            if daily_request_count >= RPD_LIMIT:
+                raise ChatBotException(f"Daily request limit of {RPD_LIMIT} reached for GeminiBalance.")
+
+            while request_timestamps and now - request_timestamps[0] > 60:
+                request_timestamps.popleft()
+            if len(request_timestamps) >= RPM_LIMIT:
+                sleep_for = 60 - (now - request_timestamps[0]) + 1
+                logger.warning(f"RPM limit reached. Waiting for {sleep_for:.2f} seconds.")
+                await asyncio.sleep(sleep_for)
+
+            input_tokens = get_messages_token_number(messages)
+            while token_timestamps and now - token_timestamps[0][0] > 60:
+                token_timestamps.popleft()
+
+            current_tpm = sum(tokens for _, tokens in token_timestamps)
+
+            if current_tpm + input_tokens > TPM_LIMIT:
+                sleep_for = 60 - (now - token_timestamps[0][0]) + 1
+                logger.warning(f"TPM limit will be exceeded. Waiting for {sleep_for:.2f} seconds.")
+                await asyncio.sleep(sleep_for)
+
+    @staticmethod
+    def _get_sleep_time(error):
+        if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
+            return random.randint(30, 60)
+        return 15
+
+
 @_register_chatbot
 class GeminiBot(ChatBot):
     def __init__(self, model_name='gemini-2.5-flash-preview-04-17', temperature=1, top_p=1, retry=8, max_async=16,
@@ -474,5 +618,6 @@ class GeminiBot(ChatBot):
 provider2chatbot = {
     ModelProvider.OPENAI: GPTBot,
     ModelProvider.ANTHROPIC: ClaudeBot,
-    ModelProvider.GOOGLE: GeminiBot
+    ModelProvider.GOOGLE: GeminiBot,
+    ModelProvider.GEMINI_BALANCE: GeminiBalanceBot
 }

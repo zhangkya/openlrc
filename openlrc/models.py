@@ -10,6 +10,7 @@ class ModelProvider(Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     GOOGLE = "google"
+    GEMINI_BALANCE = "gemini_balance"
     THIRD_PARTY = "third_party"
 
 
@@ -319,6 +320,15 @@ class Models:
         knowledge_cutoff="Jan 2025"
     )
 
+    GEMINI_2_5_FLASH = ModelInfo(
+        name="gemini-2.5-flash",
+        provider=ModelProvider.GEMINI_BALANCE,
+        input_price=0,
+        output_price=0,
+        max_tokens=8192,
+        context_window=1048576
+    )
+
     # Third Party Models
     DEEPSEEK = ModelInfo(
         name="deepseek-chat",
@@ -408,6 +418,19 @@ class Models:
                 latest_alias=None,
             )
 
+    class DefaultGeminiBalanceModelInfo(ModelInfo):
+        """Default configuration for unrecognized GeminiBalance models."""
+
+        def __init__(self, model_name: str):
+            super().__init__(
+                name=model_name,
+                provider=ModelProvider.GEMINI_BALANCE,
+                input_price=0,
+                output_price=0,
+                max_tokens=8192,
+                context_window=1048576,
+            )
+
     class DefaultThirdPartyModelInfo(ModelInfo):
         """Default configuration for unrecognized third-party models."""
 
@@ -456,6 +479,8 @@ class Models:
             default_model = cls.DefaultOpenAIModelInfo(model_name)
         elif any(name in model_name.lower() for name in ['claude', 'anthropic']):
             default_model = cls.DefaultAnthropicModelInfo(model_name)
+        elif 'gemini-balance' in model_name.lower():
+            default_model = cls.DefaultGeminiBalanceModelInfo(model_name)
         elif any(name in model_name.lower() for name in ['gemini', 'google', 'palm']):
             default_model = cls.DefaultGeminiModelInfo(model_name)
         else:
@@ -481,3 +506,4 @@ def list_chatbot_models() -> List[str]:
             models.append(model.latest_alias)
 
     return models
+''

@@ -537,3 +537,50 @@ except Exception as e:
     python -m spacy download zh_core_web_sm
     ```
     具体模型名称请参考日志中的警告信息。
+
+
+## 新增的环境变量配置
+
+在 `.env` 文件中添加了以下转录相关配置：
+
+```bash
+# 转录模型配置
+WHISPER_MODEL=large-v3        # Whisper模型名称（默认：large-v3）
+COMPUTE_TYPE=float16          # 计算类型（默认：float16）
+DEVICE=cuda                   # 计算设备（默认：cuda）
+
+# 原有的API配置
+GEMINI_BALANCE_API_KEY=sk-Wszky24224611
+GEMINI_BALANCE_API_URL=http://192.168.5.7:8000
+```
+
+## 支持的转录模型
+
+可以通过修改 `WHISPER_MODEL` 环境变量来选择不同的Whisper模型：
+
+- `tiny`, `tiny.en`
+- `base`, `base.en`
+- `small`, `small.en`
+- `medium`, `medium.en`
+- `large-v1`, `large-v2`, `large-v3`
+- `distill-large-v3`
+
+## 使用方法
+
+1. __修改.env文件__：
+
+   ```bash
+   WHISPER_MODEL=medium
+   COMPUTE_TYPE=int8
+   DEVICE=cpu
+   ```
+
+2. __运行程序__：
+
+   ```bash
+   uv run .\run.py D:\Temp\test-1.flac
+   ```
+
+3. __验证配置__：程序会自动从.env文件读取配置，无需修改代码。
+
+测试验证成功，程序现在可以灵活配置转录模型参数。

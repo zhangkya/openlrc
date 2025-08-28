@@ -7,12 +7,11 @@ from typing import Optional, Tuple, List, Type, Union
 
 from json_repair import repair_json
 
-from openlrc.chatbot import route_chatbot, GPTBot, ClaudeBot, GeminiBot, provider2chatbot
+from openlrc.chatbot import route_chatbot, GPTBot, ClaudeBot, GeminiBot, provider2chatbot, GeminiBalanceBot
 from openlrc.context import TranslationContext, TranslateInfo
 from openlrc.logger import logger
 from openlrc.models import ModelConfig, ModelProvider
-from openlrc.prompter import ChunkedTranslatePrompter, ContextReviewPrompter, ProofreaderPrompter, PROOFREAD_PREFIX, \
-    ContextReviewerValidatePrompter, TranslationEvaluatorPrompter
+from openlrc.prompter import ChunkedTranslatePrompter, ContextReviewPrompter, ProofreaderPrompter, PROOFREAD_PREFIX, ContextReviewerValidatePrompter, TranslationEvaluatorPrompter
 from openlrc.validators import POTENTIAL_PREFIX_COMBOS
 
 
@@ -26,7 +25,8 @@ class Agent(abc.ABC):
     TEMPERATURE = 1
 
     def _initialize_chatbot(self, chatbot_model: Union[str, ModelConfig], fee_limit: float, proxy: str,
-                            base_url_config: Optional[dict]) -> Union[ClaudeBot, GPTBot, GeminiBot]:
+                            base_url_config: Optional[dict], gemini_balance_api_key: Optional[str] = None,
+                            gemini_balance_api_url: Optional[str] = None) -> Union[ClaudeBot, GPTBot, GeminiBot, GeminiBalanceBot]:
         """
         Initialize a chatbot instance based on the provided parameters.
 
@@ -41,8 +41,11 @@ class Agent(abc.ABC):
         """
 
         if isinstance(chatbot_model, str):
-            chatbot_cls: Union[Type[ClaudeBot], Type[GPTBot], Type[GeminiBot]]
+            chatbot_cls: Union[Type[ClaudeBot], Type[GPTBot], Type[GeminiBot], Type[GeminiBalanceBot]]
             chatbot_cls, model_name = route_chatbot(chatbot_model)
+            if chatbot_cls == GeminiBalanceBot:
+                return chatbot_cls(model_name=model_name, fee_limit=fee_limit, proxy=proxy, retry=4,
+                                   temperature=self.TEMPERATURE, api_key=gemini_balance_api_key, base_url=gemini_balance_api_url)
             return chatbot_cls(model_name=model_name, fee_limit=fee_limit, proxy=proxy, retry=4,
                                temperature=self.TEMPERATURE, base_url_config=base_url_config)
         elif isinstance(chatbot_model, ModelConfig):
@@ -54,10 +57,14 @@ class Agent(abc.ABC):
                     base_url_config = {'openai': chatbot_model.base_url}
                 elif chatbot_model.provider == ModelProvider.ANTHROPIC:
                     base_url_config = {'anthropic': chatbot_model.base_url}
+                elif chatbot_model.provider == ModelProvider.GEMINI_BALANCE:
+                    gemini_balance_api_url = chatbot_model.base_url
                 else:
                     base_url_config = None
                     logger.warning(f'Unsupported base_url configuration for provider: {chatbot_model.provider}')
-
+            if chatbot_cls == GeminiBalanceBot:
+                return chatbot_cls(model_name=chatbot_model.name, fee_limit=fee_limit, proxy=proxy, retry=4,
+                                   temperature=self.TEMPERATURE, api_key=gemini_balance_api_key, base_url=gemini_balance_api_url)
             return chatbot_cls(model_name=chatbot_model.name, fee_limit=fee_limit, proxy=proxy, retry=4,
                                temperature=self.TEMPERATURE, base_url_config=base_url_config,
                                api_key=chatbot_model.api_key)
@@ -79,7 +86,7 @@ class ChunkedTranslatorAgent(Agent):
 
     def __init__(self, src_lang, target_lang, info: TranslateInfo = TranslateInfo(),
                  chatbot_model: Union[str, ModelConfig] = 'gpt-4.1-nano', fee_limit: float = 0.8, proxy: str = None,
-                 base_url_config: Optional[dict] = None):
+                 base_url_config: Optional[dict] = None, gemini_balance_api_key: Optional[str] = None, gemini_balance_api_url: Optional[str] = None):
         """
         Initialize the ChunkedTranslatorAgent.
 
@@ -95,7 +102,7 @@ class ChunkedTranslatorAgent(Agent):
         super().__init__()
         self.chatbot_model = chatbot_model
         self.info = info
-        self.chatbot = self._initialize_chatbot(chatbot_model, fee_limit, proxy, base_url_config)
+        self.chatbot = self._initialize_chatbot(chatbot_model, fee_limit, proxy, base_url_config, gemini_balance_api_key, gemini_balance_api_url)
         self.prompter = ChunkedTranslatePrompter(src_lang, target_lang, info)
         self.cost = 0
 

@@ -9,6 +9,7 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import Union, List, Optional, Tuple
 
+import langcodes
 import requests
 
 from openlrc.agents import ChunkedTranslatorAgent, ContextReviewerAgent
@@ -40,7 +41,8 @@ class LLMTranslator(Translator):
                  chunk_size: int = CHUNK_SIZE,
                  intercept_line: Optional[int] = None, proxy: Optional[str] = None,
                  base_url_config: Optional[dict] = None,
-                 retry_model: Optional[Union[str, ModelConfig]] = None):
+                 retry_model: Optional[Union[str, ModelConfig]] = None,
+                 gemini_balance_api_key: Optional[str] = None, gemini_balance_api_url: Optional[str] = None):
         """
         Initialize the LLMTranslator with given parameters.
 
@@ -62,6 +64,8 @@ class LLMTranslator(Translator):
         self.intercept_line = intercept_line
         self.retry_model = retry_model
         self.use_retry_cnt = 0
+        self.gemini_balance_api_key = gemini_balance_api_key
+        self.gemini_balance_api_url = gemini_balance_api_url
 
     @staticmethod
     def make_chunks(texts: List[str], chunk_size: int = 30) -> List[List[Tuple[int, str]]]:
@@ -167,14 +171,41 @@ class LLMTranslator(Translator):
         Returns:
             List[str]: List of translated texts.
         """
+
+        try:
+            if langcodes.find(src_lang).language == 'zh':
+                logger.info("Source language is Chinese, skipping translation.")
+                return texts
+        except LookupError:
+            # Handle cases where langcodes can't find the language
+            if src_lang.startswith('zh'):
+                logger.info("Source language is Chinese, skipping translation.")
+                return texts
+            # Re-raise for other languages
+            raise
+
+        chatbot_model = self.chatbot_model
+        try:
+            is_chinese = langcodes.find(src_lang).language == 'zh'
+        except LookupError:
+            is_chinese = src_lang.startswith('zh')
+        
+        if not is_chinese and self.chatbot_model == 'gemini-2.5-flash':
+            logger.info(f"Source language is not Chinese. Using GeminiBalance model: {self.chatbot_model}")
+            chatbot_model = self.chatbot_model
+
         if not isinstance(texts, list):
             texts = [texts]
 
-        translator_agent = ChunkedTranslatorAgent(src_lang, target_lang, info, self.chatbot_model, self.fee_limit,
-                                                  self.proxy, self.base_url_config)
+        translator_agent = ChunkedTranslatorAgent(src_lang, target_lang, info, chatbot_model, self.fee_limit,
+                                                  self.proxy,
+                                                  self.base_url_config,
+                                                  gemini_balance_api_key=self.gemini_balance_api_key,
+                                                  gemini_balance_api_url=self.gemini_balance_api_url)
 
         retry_agent = ChunkedTranslatorAgent(src_lang, target_lang, info, self.retry_model, self.fee_limit,
-                                             self.proxy, self.base_url_config) if self.retry_model else None
+                                             self.proxy,
+                                             self.base_url_config) if self.retry_model else None
 
         # proofreader = ProofreaderAgent(src_lang, target_lang, info, self.chatbot_model, self.fee_limit, self.proxy,
         #                                self.base_url_config)
@@ -185,7 +216,7 @@ class LLMTranslator(Translator):
         translations, summaries, compare_list, start_chunk, guideline = self._resume_translation(compare_path)
         if not guideline:
             logger.info('Building translation guideline.')
-            context_reviewer = ContextReviewerAgent(src_lang, target_lang, info, self.chatbot_model, self.retry_model,
+            context_reviewer = ContextReviewerAgent(src_lang, target_lang, info, chatbot_model, self.retry_model,
                                                     self.fee_limit, self.proxy, self.base_url_config)
             guideline = context_reviewer.build_context(
                 texts, title=info.title, glossary=info.glossary, forced_glossary=info.forced_glossary
@@ -203,9 +234,8 @@ class LLMTranslator(Translator):
             # )
 
             if len(translated) != len(chunk):
-                logger.warning(f'Chunk {i} translation length inconsistent: {len(translated)} vs {len(chunk)},'
-                               f' Attempting atomic translation.')
-                translated = self.atomic_translate(self.chatbot_model, chunk_texts, src_lang, target_lang)
+                logger.warning(f'Chunk {i} translation length inconsistent: {len(translated)} vs {len(chunk)},Attempting atomic translation.')
+                translated = self.atomic_translate(chatbot_model, chunk_texts, src_lang, target_lang)
                 atomic = True
 
             translations.extend(translated)
